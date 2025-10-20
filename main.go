@@ -2,10 +2,15 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
 )
+
+func health(w http.ResponseWriter, req *http.Request) {
+	fmt.Fprintln(w, `{"status": "ok"}`)
+}
 
 func minio(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "hello\n")
@@ -20,6 +25,12 @@ func main() {
 		}
 		port = p
 	}
+
+	http.HandleFunc("/health", health)
 	http.HandleFunc("/minio", minio)
-	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
+
+	log.Printf("Starting server on port %d...", port)
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), handler); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }
