@@ -8,4 +8,6 @@ sent a webhook to this script, which can then copy the files from minIO to Twake
 
 The script can be configured via environment variables:
 
-* `PORT`: the port on which the script listens for webhooks (8090 be default)
+* `PORT`: the port on which the script listens for webhooks (8090 by default)
+* `CLOUDERY_URL`: the URL of the cloudery (https://manager.cozycloud.cc/ by default)
+* `CLOUDERY_TOKEN`: the TOKEN for making requests to the cloudery
