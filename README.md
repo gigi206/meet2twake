@@ -9,6 +9,7 @@ This script can be used as glue to put the transcripts and recordings of visio
 
 The script can be configured via environment variables:
 
+* `LOG_LEVEL`: `debug`, `info` (default), `warn`, or `error`
 * `PORT`: the port on which the script listens for webhooks (8090 by default)
 * `CLOUDERY_URL`: the URL of the cloudery (`https://manager.cozycloud.cc/` by default)
 * `CLOUDERY_TOKEN`: the TOKEN for making requests to the cloudery
