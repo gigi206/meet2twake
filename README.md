@@ -3,6 +3,8 @@
 This script can be used as glue to put the transcripts and recordings of visio
 (meet) in Twake Drive.
 
+![diagram](docs/diagram.svg)
+
 ## Configuration
 
 The script can be configured via environment variables:

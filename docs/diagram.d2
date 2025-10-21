@@ -1,0 +1,15 @@
+# https://d2lang.com/
+
+meet: {label: "Meet"}
+livekit: {label: "Livekit"}
+minio: {label: "minIO"}
+meet2twake: {label: "meet2twake"}
+tdrive: {label: "Twake Drive"}
+ai: {label: "APIs for AI"}
+
+meet -> livekit -> minio
+minio -> meet2twake: webhook after recordings upload
+meet2twake -> tdrive: upload
+minio -> meet: webhook
+meet -> meet2twake: send the transcript
+meet -> ai: generate the transcript
