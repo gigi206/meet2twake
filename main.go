@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/uuid/v5"
+	pgxfrs "github.com/jackc/pgx-gofrs-uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -178,7 +182,7 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	sub, err := getSubFromRoomID(roomID)
+	sub, err := getSubFromRoomID(*roomID)
 	if err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
@@ -213,21 +217,29 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 	res.WriteHeader(http.StatusNoContent)
 }
 
-func getRoomID(key string) (string, error) {
+func getRoomID(key string) (*uuid.UUID, error) {
 	obj, err := getFromMinIO(key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer obj.Close()
 	var data map[string]any
 	if err := json.NewDecoder(obj).Decode(&data); err != nil {
-		return "", err
+		return nil, err
 	}
 	roomID, _ := data["room_id"].(string)
 	if roomID == "" {
-		return "", errors.New("no room_id")
+		return nil, errors.New("no room_id")
 	}
-	return roomID, nil
+	decoded, err := base64.RawStdEncoding.DecodeString(roomID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid room_id: %w", err)
+	}
+	id, err := uuid.FromBytes(decoded)
+	if err != nil {
+		return nil, fmt.Errorf("invalid room_id: %w", err)
+	}
+	return &id, nil
 }
 
 func getFromMinIO(key string) (io.ReadCloser, error) {
@@ -253,13 +265,23 @@ WHERE ra.resource_id = $1
 ORDER BY ra.created_at;
 `
 
-func getSubFromRoomID(roomID string) (string, error) {
+func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, os.Getenv("POSTGRES_URL"))
+	config, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
+	if err != nil {
+		return "", fmt.Errorf("Cannot parse PG config: %s", err)
+	}
+
+	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		pgxfrs.Register(conn.TypeMap())
+		return nil
+	}
+
+	conn, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return "", fmt.Errorf("Cannot connect to PG: %s", err)
 	}
-	defer conn.Close(ctx)
+	defer conn.Close()
 
 	var sub string
 	err = conn.QueryRow(context.Background(), query, roomID).Scan(&sub)
@@ -267,7 +289,7 @@ func getSubFromRoomID(roomID string) (string, error) {
 		return "", fmt.Errorf("Cannot query: %s", err)
 	}
 	slog.Debug("getSubFromRoomID",
-		"roomID", roomID,
+		"roomID", roomID.String(),
 		"sub", sub)
 	return sub, nil
 }
