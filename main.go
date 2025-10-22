@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -174,7 +173,7 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	roomID, err := getRoomID(webhook.Key)
+	roomID, startedAt, err := getRoomIDAndStartedAt(webhook.Key)
 	if err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
@@ -206,7 +205,7 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 	}
 	defer content.Close()
 
-	if err := saveContent(instance, token, filepath.Base(key), content); err != nil {
+	if err := saveContent(instance, token, filepath.Base(key), startedAt, content); err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
 	}
@@ -215,27 +214,32 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 	res.WriteHeader(http.StatusNoContent)
 }
 
-func getRoomID(key string) (*uuid.UUID, error) {
+type recordingJSON struct {
+	RoomName  string `json:"room_name"`
+	StartedAt int64  `json:"started_at"`
+}
+
+func getRoomIDAndStartedAt(key string) (*uuid.UUID, *time.Time, error) {
 	obj, err := getFromMinIO(key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer obj.Close()
-	var data map[string]any
+	var data recordingJSON
 	if err := json.NewDecoder(obj).Decode(&data); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The actual UUID is in room_name, not room_id
-	roomName, _ := data["room_name"].(string)
-	if roomName == "" {
-		return nil, errors.New("no room_name")
-	}
-	slog.Debug("getRoomID", "room_name", roomName)
-	id, err := uuid.FromString(roomName)
+	slog.Debug("getRoomID",
+		"room_name", data.RoomName,
+		"started_at", data.StartedAt,
+	)
+	id, err := uuid.FromString(data.RoomName)
 	if err != nil {
-		return nil, fmt.Errorf("invalid room_name UUID: %w", err)
+		return nil, nil, fmt.Errorf("invalid room_name UUID: %w", err)
 	}
-	return &id, nil
+	startedAt := time.UnixMicro(data.StartedAt / 1000)
+	return &id, &startedAt, nil
 }
 
 func getFromMinIO(key string) (*minio.Object, error) {
@@ -323,7 +327,16 @@ func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 	return sub, nil
 }
 
-func saveContent(instance, token, filename string, content *minio.Object) error {
+func saveContent(instance, token, filename string, startedAt *time.Time, content *minio.Object) error {
+	dirID, err := ensureMeetingDirectory(instance, token, startedAt)
+	if err != nil {
+		return fmt.Errorf("cannot create directory in drive: %w", err)
+	}
+	if strings.Contains(filename, ".ogg") {
+		filename = "audio-" + filename
+	} else if strings.Contains(filename, ".mp4") {
+		filename = "recording-" + filename
+	}
 	q := &url.Values{}
 	q.Add("Type", "file")
 	q.Add("Name", filename)
@@ -333,7 +346,7 @@ func saveContent(instance, token, filename string, content *minio.Object) error 
 	u := &url.URL{
 		Scheme:   "https",
 		Host:     instance,
-		Path:     "/files/io.cozy.files.root-dir",
+		Path:     "/files/" + dirID,
 		RawQuery: q.Encode(),
 	}
 	req, err := http.NewRequest(http.MethodPost, u.String(), content)
@@ -354,6 +367,100 @@ func saveContent(instance, token, filename string, content *minio.Object) error 
 		return fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
 	}
 	return nil
+}
+
+const meetingsDirName = "Meetings"
+
+func ensureMeetingDirectory(instance, token string, startedAt *time.Time) (string, error) {
+	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir")
+	if err != nil {
+		return "", err
+	}
+	dirname := startedAt.Format("2006-01-02 15:04")
+	return ensureDirectory(instance, token, "/"+meetingsDirName+"/"+dirname, meetingsDirID)
+}
+
+func ensureDirectory(instance, token, path, parentID string) (string, error) {
+	dirID, err := getDirID(instance, token, path)
+	if err != nil {
+		return "", err
+	}
+	if dirID != "" {
+		return dirID, nil
+	}
+	return createDirectory(instance, token, filepath.Base(path), parentID)
+}
+
+type stackFile struct {
+	Data struct {
+		ID string `json:"id"`
+	} `json:"data"`
+}
+
+func getDirID(instance, token, path string) (string, error) {
+	q := &url.Values{}
+	q.Add("Path", path)
+	u := &url.URL{
+		Scheme:   "https",
+		Host:     instance,
+		Path:     "/files/metadata",
+		RawQuery: q.Encode(),
+	}
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("cannot make request to stack: %w", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cannot call stack: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode == http.StatusNotFound {
+		return "", nil
+	}
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+	}
+	var file stackFile
+	if err := json.NewDecoder(res.Body).Decode(&file); err != nil {
+		return "", fmt.Errorf("cannot parse the response from the stack: %w", err)
+	}
+	return file.Data.ID, nil
+}
+
+func createDirectory(instance, token, dirname, parentID string) (string, error) {
+	q := &url.Values{}
+	q.Add("Type", "directory")
+	q.Add("Name", dirname)
+	u := &url.URL{
+		Scheme:   "https",
+		Host:     instance,
+		Path:     "/files/" + parentID,
+		RawQuery: q.Encode(),
+	}
+	req, err := http.NewRequest(http.MethodPost, u.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("cannot make request to stack: %w", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("cannot call stack: %w", err)
+	}
+	slog.Debug("Create directory",
+		"instance", instance,
+		"name", dirname,
+		"status", res.StatusCode)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+	}
+	var file stackFile
+	if err := json.NewDecoder(res.Body).Decode(&file); err != nil {
+		return "", fmt.Errorf("cannot parse the response from the stack: %w", err)
+	}
+	return file.Data.ID, nil
 }
 
 type transcriptRequest struct {
@@ -430,6 +537,11 @@ func getDriveToken(instance string) (string, error) {
 }
 
 func saveTranscript(instance, token string, transcript transcriptRequest) error {
+	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir")
+	if err != nil {
+		return err
+	}
+
 	q := &url.Values{}
 	q.Add("Type", "file")
 	q.Add("Name", transcript.Title+".cozy-note")
@@ -437,7 +549,7 @@ func saveTranscript(instance, token string, transcript transcriptRequest) error 
 	u := &url.URL{
 		Scheme:   "https",
 		Host:     instance,
-		Path:     "/files/io.cozy.files.root-dir",
+		Path:     "/files/" + meetingsDirID,
 		RawQuery: q.Encode(),
 	}
 	body := strings.NewReader(transcript.Content)
