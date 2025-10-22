@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -215,10 +216,24 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 }
 
 func getRoomID(key string) (*uuid.UUID, error) {
-	parts := strings.Split(filepath.Base(key), ".")
-	id, err := uuid.FromString(parts[0])
+	obj, err := getFromMinIO(key)
 	if err != nil {
-		return nil, fmt.Errorf("invalid room_id: %w", err)
+		return nil, err
+	}
+	defer obj.Close()
+	var data map[string]any
+	if err := json.NewDecoder(obj).Decode(&data); err != nil {
+		return nil, err
+	}
+	// The actual UUID is in room_name, not room_id
+	roomName, _ := data["room_name"].(string)
+	if roomName == "" {
+		return nil, errors.New("no room_name")
+	}
+	slog.Debug("getRoomID", "room_name", roomName)
+	id, err := uuid.FromString(roomName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid room_name UUID: %w", err)
 	}
 	return &id, nil
 }
