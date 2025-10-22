@@ -17,7 +17,21 @@ The script can be configured via environment variables:
 * `MINIO_USER`: the username for minIO (like `minio`)
 * `MINIO_PASSWORD`: the password for minIO
 * `MINIO_INSECURE`: `true` to skip the TLS certificate check
-* `POSTGRES_URL`: the URL of the postgresql database (like `postgres://username:password@localhost:5432/database_name`)
 
-For the Postgresql connection, it's also possible to use env variables listed on
-https://www.postgresql.org/docs/current/libpq-envars.html
+### PostgreSQL Configuration
+
+You can configure PostgreSQL connection in two ways:
+
+**Option 1: Using POSTGRES_URL (connection string)**
+* `POSTGRES_URL`: the URL of the postgresql database (like `postgres://username:password@localhost:5432/database_name`)
+  - Note: Special characters in username/password must be URL-encoded
+
+**Option 2: Using separate variables (recommended)**
+* `POSTGRES_HOST`: the PostgreSQL host (like `localhost` or `postgres.namespace.svc.cluster.local`)
+* `POSTGRES_PORT`: the PostgreSQL port (default: `5432`)
+* `POSTGRES_USER`: the PostgreSQL username
+* `POSTGRES_PASSWORD`: the PostgreSQL password (no encoding needed)
+* `POSTGRES_DB`: the database name
+* `POSTGRES_SSLMODE`: SSL mode (`disable`, `require`, `verify-ca`, `verify-full`; default: `require`)
+
+The separate variables approach is recommended as it handles special characters in passwords automatically.
