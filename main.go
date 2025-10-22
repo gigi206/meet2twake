@@ -264,9 +264,42 @@ WHERE ra.resource_id = $1
 ORDER BY ra.created_at;
 `
 
+func getPostgresURL() string {
+	// Si POSTGRES_URL est défini, l'utiliser directement (rétrocompatibilité)
+	if pgURL := os.Getenv("POSTGRES_URL"); pgURL != "" {
+		return pgURL
+	}
+
+	// Sinon, construire l'URL à partir des composants
+	host := os.Getenv("POSTGRES_HOST")
+	port := os.Getenv("POSTGRES_PORT")
+	user := os.Getenv("POSTGRES_USER")
+	password := os.Getenv("POSTGRES_PASSWORD")
+	database := os.Getenv("POSTGRES_DB")
+	sslmode := os.Getenv("POSTGRES_SSLMODE")
+
+	if host == "" || user == "" || password == "" || database == "" {
+		log.Fatal("POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD and POSTGRES_DB must be defined")
+	}
+
+	if port == "" {
+		port = "5432"
+	}
+	if sslmode == "" {
+		sslmode = "require"
+	}
+
+	// Encoder le user et password pour l'URL
+	userEncoded := url.QueryEscape(user)
+	passwordEncoded := url.QueryEscape(password)
+
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+		userEncoded, passwordEncoded, host, port, database, sslmode)
+}
+
 func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 	ctx := context.Background()
-	config, err := pgxpool.ParseConfig(os.Getenv("POSTGRES_URL"))
+	config, err := pgxpool.ParseConfig(getPostgresURL())
 	if err != nil {
 		return "", fmt.Errorf("Cannot parse PG config: %s", err)
 	}
