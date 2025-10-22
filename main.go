@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -242,7 +241,7 @@ func getRoomID(key string) (*uuid.UUID, error) {
 	return &id, nil
 }
 
-func getFromMinIO(key string) (io.ReadCloser, error) {
+func getFromMinIO(key string) (*minio.Object, error) {
 	ctx := context.Background()
 	parts := strings.SplitN(key, "/", 2)
 	bucket := parts[0]
@@ -294,11 +293,13 @@ func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 	return sub, nil
 }
 
-func saveContent(instance, token, filename string, content io.Reader) error {
+func saveContent(instance, token, filename string, content *minio.Object) error {
 	q := &url.Values{}
 	q.Add("Type", "file")
 	q.Add("Name", filename)
-	// TODO content-length
+	if info, err := content.Stat(); err == nil {
+		q.Add("Content-Length", fmt.Sprintf("%d", info.Size))
+	}
 	u := &url.URL{
 		Scheme:   "https",
 		Host:     instance,
