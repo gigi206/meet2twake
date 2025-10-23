@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"log/slog"
 	"net/http"
@@ -21,10 +23,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/wneessen/go-mail"
 )
 
 var clouderyURL, clouderyToken string
 var minioClient *minio.Client
+var mailFrom, mailSMTP string
+var mailPort int
+var mailTLSPolicy mail.TLSPolicy
 
 func main() {
 	debug := false
@@ -58,6 +64,35 @@ func main() {
 	if clouderyToken == "" {
 		slog.Error("Missing CLOUDERY_TOKEN")
 		os.Exit(1)
+	}
+
+	mailFrom = "noreply@linagora.com"
+	if from := os.Getenv("MAIL_FROM"); from != "" {
+		mailFrom = from
+	}
+	mailSMTP = "smtp.linagora.com"
+	if smtp := os.Getenv("MAIL_SMTP"); smtp != "" {
+		mailSMTP = smtp
+	}
+	mailPort = 25
+	if env := os.Getenv("MAIL_PORT"); env != "" {
+		p, err := strconv.Atoi(env)
+		if err != nil {
+			slog.Error("Failed to parse the MAIL_PORT", "error", err)
+			os.Exit(1)
+		}
+		mailPort = p
+	}
+	mailTLSPolicy = mail.TLSMandatory
+	if disable := os.Getenv("MAIL_DISABLE_TLS"); disable != "" {
+		noTLS, err := strconv.ParseBool(disable)
+		if err != nil {
+			slog.Error("Invalid MAIL_DISABLE_TLS", "error", err)
+			os.Exit(1)
+		}
+		if noTLS {
+			mailTLSPolicy = mail.NoTLS
+		}
 	}
 
 	prepareMinIOClient(debug)
@@ -489,12 +524,19 @@ func transcriptHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if err := saveTranscript(instance, token, transcript); err != nil {
+	dirID, err := saveTranscript(instance, token, transcript)
+	if err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
 	}
-
 	slog.Info("transcript saved", "sub", transcript.Sub)
+
+	if err := sendEmail(transcript.Email, instance, dirID); err != nil {
+		sendError(http.StatusInternalServerError, res, err)
+		return
+	}
+	slog.Info("email sent")
+
 	res.WriteHeader(http.StatusNoContent)
 }
 
@@ -536,10 +578,10 @@ func getDriveToken(instance string) (string, error) {
 	return body.Token, nil
 }
 
-func saveTranscript(instance, token string, transcript transcriptRequest) error {
+func saveTranscript(instance, token string, transcript transcriptRequest) (string, error) {
 	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir")
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	q := &url.Values{}
@@ -555,12 +597,12 @@ func saveTranscript(instance, token string, transcript transcriptRequest) error 
 	body := strings.NewReader(transcript.Content)
 	req, err := http.NewRequest(http.MethodPost, u.String(), body)
 	if err != nil {
-		return fmt.Errorf("cannot make request to stack: %w", err)
+		return "", fmt.Errorf("cannot make request to stack: %w", err)
 	}
 	req.Header.Add("Authorization", "Bearer "+token)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("cannot call stack: %w", err)
+		return "", fmt.Errorf("cannot call stack: %w", err)
 	}
 	slog.Debug("Save transcript",
 		"instance", instance,
@@ -568,7 +610,653 @@ func saveTranscript(instance, token string, transcript transcriptRequest) error 
 		"status", res.StatusCode)
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
 	}
-	return nil
+	return meetingsDirID, nil
 }
+
+func sendEmail(recipient, instance, dirID string) error {
+	title := "Un enregistrement est disponible dans votre Twake Drive"
+	text := `Vous pouvez dès à présent retrouver les fichiers liés à votre réunion dans votre Twake Drive.`
+	parts := strings.Split(instance, ".")
+	parts[0] += "-drive"
+	link := fmt.Sprintf("https://%s/#/folder/%s", strings.Join(parts, "."), dirID)
+	tmpl := template.Must(template.New("email").Parse(emailTemplate))
+	buf := new(bytes.Buffer)
+	tmpl.Execute(buf, map[string]any{"Title": title, "Text": text, "Link": link})
+	html := buf.String()
+	text += "\n\n" + link
+
+	message := mail.NewMsg()
+	if err := message.From(mailFrom); err != nil {
+		return err
+	}
+	if err := message.To(recipient); err != nil {
+		return err
+	}
+	message.Subject(title)
+	message.SetBodyString(mail.TypeTextPlain, text)
+	message.SetBodyString(mail.TypeTextHTML, html)
+	client, err := mail.NewClient(mailSMTP, mail.WithPort(mailPort),
+		mail.WithTLSPolicy(mailTLSPolicy))
+	if err != nil {
+		return err
+	}
+	return client.DialAndSend(message)
+}
+
+const emailTemplate = `
+<!doctype html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+
+<head>
+  <title></title>
+  <!--[if !mso]><!-- -->
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <!--<![endif]-->
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style type="text/css">
+    #outlook a {
+      padding: 0;
+    }
+    .ReadMsgBody {
+      width: 100%;
+    }
+    .ExternalClass {
+      width: 100%;
+    }
+    .ExternalClass * {
+      line-height: 100%;
+    }
+    body {
+      margin: 0;
+      padding: 0;
+      -webkit-text-size-adjust: 100%;
+      -ms-text-size-adjust: 100%;
+    }
+    table,
+    td {
+      border-collapse: collapse;
+      mso-table-lspace: 0pt;
+      mso-table-rspace: 0pt;
+    }
+    img {
+      border: 0;
+      height: auto;
+      line-height: 100%;
+      outline: none;
+      text-decoration: none;
+      -ms-interpolation-mode: bicubic;
+    }
+    p {
+      display: block;
+      margin: 13px 0;
+    }
+  </style>
+
+  <!--[if !mso]><!-->
+  <style type="text/css">
+    @media only screen and (max-width:480px) {
+      @-ms-viewport {
+        width: 320px;
+      }
+      @viewport {
+        width: 320px;
+      }
+    }
+  </style>
+  <!--<![endif]-->
+
+  <!--[if mso]>
+        <xml>
+        <o:OfficeDocumentSettings>
+          <o:AllowPNG/>
+          <o:PixelsPerInch>96</o:PixelsPerInch>
+        </o:OfficeDocumentSettings>
+        </xml>
+        <![endif]-->
+  <!--[if lte mso 11]>
+        <style type="text/css">
+          .outlook-group-fix { width:100% !important; }
+        </style>
+        <![endif]-->
+  <!--[if !mso]><!-->
+  <link href="https://fonts.googleapis.com/css?family=Inter" rel="stylesheet" type="text/css">
+  <style type="text/css">
+    @import url(https://fonts.googleapis.com/css?family=Inter);
+  </style>
+  <!--<![endif]-->
+
+  <style type="text/css">
+    @media only screen and (min-width:480px) {
+      .mj-column-per-100 {
+        width: 100% !important;
+        max-width: 100%;
+      }
+      .mj-column-per-49 {
+        width: 49.5% !important;
+        max-width: 49.5%;
+      }
+      .mj-column-per-1 {
+        width: 1% !important;
+        max-width: 1%;
+      }
+      .mj-column-per-50 {
+        width: 50% !important;
+        max-width: 50%;
+      }
+    }
+  </style>
+  <style type="text/css">
+    @media only screen and (max-width:480px) {
+      table.full-width-mobile {
+        width: 100% !important;
+      }
+      td.full-width-mobile {
+        width: auto !important;
+      }
+    }
+  </style>
+  <style type="text/css">
+    .primary-link {
+      color: #0a84ff;
+      text-decoration: none;
+      font-weight: bold;
+    }
+    .highlight {
+      color: #0a84ff;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body style="background-color:#f3f6f9;">
+  <div style="background-color:#f3f6f9;">
+
+    <!--[if mso | IE]>
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+    <div style="Margin:0px auto;max-width:600px;">
+      <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+        <tbody>
+          <tr>
+            <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+              <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="vertical-align:top;width:600px;">
+          <![endif]-->
+              <div class="mj-column-per-100 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;">
+                <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                  <tr>
+                    <td align="left" style="font-size:0px;padding:16px;word-break:break-word;">
+                      <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;border-spacing:0px;">
+                        <tbody>
+                          <tr>
+                            <td style="width:370px;">
+                              <img alt="Twake Workplace" height="48" src="https://files.cozycloud.cc/cozy-mjml/twakeworkplacelogo.png" style="border:0;display:block;outline:none;text-decoration:none;height:48px;width:100%;" width="370" />
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+    <div style="background:#ffffff;background-color:#ffffff;Margin:0px auto;border-radius:8px;max-width:600px;">
+      <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background:#ffffff;background-color:#ffffff;width:100%;border-radius:8px;">
+        <tbody>
+          <tr>
+            <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+              <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+            <tr>
+              <td class="" width="600px">
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+              <div style="Margin:0px auto;max-width:600px;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+                  <tbody>
+                    <tr>
+                      <td style="direction:ltr;font-size:0px;padding:24px0 8px;text-align:center;vertical-align:top;">
+                        <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="vertical-align:top;width:600px;">
+          <![endif]-->
+                        <div class="mj-column-per-100 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;">
+                          <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                            <tr>
+                              <td align="left" style="font-size:0px;padding:0 24px 16px;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:14px;font-weight:bold;line-height:1.5;text-align:left;color:#95999d;">
+                                  <img src="https://files.cozycloud.cc/email-assets/stack/twake-download.png" width="16" height="16" style="vertical-align:sub;" /> {{.Title}}</div>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td align="left" style="font-size:0px;padding:0 24px 16px;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:16px;line-height:1.5;text-align:left;color:#32363f;"> Bonjour, </div>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td align="left" style="font-size:0px;padding:0 24px 16px;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:16px;line-height:1.5;text-align:left;color:#32363f;">{{.Text}}</div>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td align="left" vertical-align="middle" style="font-size:0px;padding:0 24px 32px;word-break:break-word;">
+                                <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate;line-height:100%;">
+                                  <tr>
+                                    <td align="center" bgcolor="#297ef2" role="presentation" style="border:none;border-radius:32px;cursor:auto;padding:10px 16px;background:#297ef2;" valign="middle">
+                                      <a href="{{.Link}}" style="background:#297ef2;color:#ffffff;font-family:inter,Arial;font-size:14px;font-weight:bold;line-height:1.43;Margin:0;text-decoration:none;text-transform:none;" target="_blank">
+									  Voir le répertoire
+									  </a>
+                                    </td>
+                                  </tr>
+                                </table>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                        <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+              </td>
+            </tr>
+                  </table>
+                <![endif]-->
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+    <div style="Margin:0px auto;max-width:600px;">
+      <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+        <tbody>
+          <tr>
+            <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+              <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+            <tr>
+              <td class="" width="600px">
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+              <div style="Margin:0px auto;max-width:600px;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+                  <tbody>
+                    <tr>
+                      <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+                        <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="vertical-align:top;width:600px;">
+          <![endif]-->
+                        <div class="mj-column-per-100 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;">
+                          <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                            <tr>
+                              <td align="center" style="font-size:0px;padding:0;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:16px;font-weight:bold;line-height:1.5;text-align:center;color:#0a84ff;">
+								Twake Workplace héberge votre domicile numérique
+								</div>
+                              </td>
+                            </tr>
+                            <tr>
+                              <td align="center" style="font-size:0px;padding:10px 25px;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:14px;line-height:1.5;text-align:center;color:#95999d;">
+								Hébergé en France - Respectueux de votre vie privée - Sécurisé
+								</div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                        <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+              </td>
+            </tr>
+            <tr>
+              <td class="" width="600px">
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600">
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+              <div style="Margin:0px auto;max-width:600px;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+                  <tbody>
+                    <tr>
+                      <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+                        <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="width:600px;">
+          <![endif]-->
+                        <div class="mj-column-per-100 outlook-group-fix" style="font-size:0;line-height:0;text-align:left;display:inline-block;width:100%;direction:ltr;">
+                          <!--[if mso | IE]>
+        <table  role="presentation" border="0" cellpadding="0" cellspacing="0">
+          <tr>
+              <td style="vertical-align:top;width:297px;">
+              <![endif]-->
+                          <div class="mj-column-per-49 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:49.5%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" width="100%">
+                              <tbody>
+                                <tr>
+                                  <td style="vertical-align:top;padding:0;">
+                                    <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+                                      <tr>
+                                        <td align="right" vertical-align="middle" style="font-size:0px;padding:0;word-break:break-word;">
+                                          <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate;line-height:100%;">
+                                            <tr>
+                                              <td align="center" bgcolor="transparent" role="presentation" style="border:none;border-radius:3px;cursor:auto;padding:10px 8px;background:transparent;" valign="middle">
+                                                <a href="https://blog.cozy.io/fr/" style="background:transparent;color:#0a84ff;font-family:inter,Arial;font-size:12px;font-weight:bold;line-height:1.5;Margin:0;text-decoration:none;text-transform:none;" target="_blank"> Blog de Twake Workplace </a>
+                                              </td>
+                                            </tr>
+                                          </table>
+                                        </td>
+                                      </tr>
+                                    </table>
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+              <td style="vertical-align:top;width:6px;">
+              <![endif]-->
+                          <div class="mj-column-per-1 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:1%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" width="100%">
+                              <tbody>
+                                <tr>
+                                  <td style="vertical-align:top;padding:0;">
+                                    <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+                                      <tr>
+                                        <td align="center" style="font-size:0px;padding:5px 0;word-break:break-word;">
+                                          <div style="font-family:inter,Arial;font-size:16px;line-height:1.5;text-align:center;color:#95999d;"> | </div>
+                                        </td>
+                                      </tr>
+                                    </table>
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+              <td style="vertical-align:top;width:297px;" >
+              <![endif]-->
+                          <div class="mj-column-per-49 outlook-group-fix"style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:49.5%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" width="100%">
+                              <tbody>
+                                <tr>
+                                  <td style="vertical-align:top;padding:0;">
+                                    <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="" width="100%">
+                                      <tr>
+                                        <td align="left" vertical-align="middle" style="font-size:0px;padding:0;word-break:break-word;">
+                                          <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:separate;line-height:100%;">
+                                            <tr>
+                                              <td align="center" bgcolor="transparent" role="presentation" style="border:none;border-radius:3px;cursor:auto;padding:10px 8px;background:transparent;" valign="middle">
+                                                <a href="https://support.cozy.io/" style="background:transparent;color:#0a84ff;font-family:inter,Arial;font-size:12px;font-weight:bold;line-height:1.5;Margin:0;text-decoration:none;text-transform:none;" target="_blank"> Aide et support </a>
+                                              </td>
+                                            </tr>
+                                          </table>
+                                        </td>
+                                      </tr>
+                                    </table>
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+          </tr>
+          </table>
+        <![endif]-->
+                        </div>
+                        <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+              </td>
+            </tr>
+            <tr>
+              <td class="" width="600px" >
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600" >
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+              <div style="Margin:0px auto;max-width:600px;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+                  <tbody>
+                    <tr>
+                      <td style="direction:ltr;font-size:0px;padding:20px;padding-bottom:5px;text-align:center;vertical-align:top;">
+                        <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="width:600px;" >
+          <![endif]-->
+                        <div class="mj-column-per-100 outlook-group-fix" style="font-size:0;line-height:0;text-align:left;display:inline-block;width:100%;direction:ltr;">
+                          <!--[if mso | IE]>
+        <table  role="presentation" border="0" cellpadding="0" cellspacing="0">
+          <tr>
+              <td style="vertical-align:top;width:300px;" >
+              <![endif]-->
+                          <div class="mj-column-per-50 outlook-group-fix"style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:50%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                              <tr>
+                                <td align="right" style="font-size:0px;padding:4px;word-break:break-word;">
+                                  <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;border-spacing:0px;">
+                                    <tbody>
+                                      <tr>
+                                        <td style="width:130px;">
+                                          <a href="https://itunes.apple.com/fr/developer/cozy-cloud/id1131616091?mt=8" target="_blank">
+                                            <img alt="Appstore" height="auto" src="https://files.cozycloud.cc/cozy-mjml/twake-appstore-fr.png" style="border:0;display:block;outline:none;text-decoration:none;height:auto;width:100%;" width="130" />
+                                          </a>
+                                        </td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+              <td style="vertical-align:top;width:300px;" >
+              <![endif]-->
+                          <div class="mj-column-per-50 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:50%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                              <tr>
+                                <td align="left" style="font-size:0px;padding:4px;word-break:break-word;">
+                                  <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;border-spacing:0px;">
+                                    <tbody>
+                                      <tr>
+                                        <td style="width:130px;">
+                                          <a href="https://play.google.com/store/apps/developer?id=Cozy+Cloud&hl=fr" target="_blank">
+                                            <img alt="Play Store" height="auto" src="https://files.cozycloud.cc/cozy-mjml/twake-playstore-fr.png" style="border:0;display:block;outline:none;text-decoration:none;height:auto;width:100%;" width="130" />
+                                          </a>
+                                        </td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+              <td style="vertical-align:top;width:600px;" >
+              <![endif]-->
+                          <div class="mj-column-per-100 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;">
+                            <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                              <tr>
+                                <td align="center" style="font-size:0px;padding:4px;word-break:break-word;">
+                                  <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="border-collapse:collapse;border-spacing:0px;">
+                                    <tbody>
+                                      <tr>
+                                        <td style="width:130px;">
+                                          <a href="https://cozy.io/fr/download/#desktop" target="_blank">
+                                            <img alt="Cozy Desktop" height="auto" src="https://files.cozycloud.cc/cozy-mjml/twake-desktop-fr.png" style="border:0;display:block;outline:none;text-decoration:none;height:auto;width:100%;" width="130" />
+                                          </a>
+                                        </td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            </table>
+                          </div>
+                          <!--[if mso | IE]>
+              </td>
+          </tr>
+          </table>
+        <![endif]-->
+                        </div>
+                        <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+              </td>
+            </tr>
+            <tr>
+              <td class="" width="600px" >
+      <table
+         align="center" border="0" cellpadding="0" cellspacing="0" class="" style="width:600px;" width="600" >
+        <tr>
+          <td style="line-height:0px;font-size:0px;mso-line-height-rule:exactly;">
+      <![endif]-->
+              <div style="Margin:0px auto;max-width:600px;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" role="presentation" style="width:100%;">
+                  <tbody>
+                    <tr>
+                      <td style="direction:ltr;font-size:0px;padding:0;text-align:center;vertical-align:top;">
+                        <!--[if mso | IE]>
+                  <table role="presentation" border="0" cellpadding="0" cellspacing="0">
+        <tr>
+            <td class="" style="vertical-align:top;width:600px;" >
+          <![endif]-->
+                        <div class="mj-column-per-100 outlook-group-fix" style="font-size:13px;text-align:left;direction:ltr;display:inline-block;vertical-align:top;width:100%;">
+                          <table border="0" cellpadding="0" cellspacing="0" role="presentation" style="vertical-align:top;" width="100%">
+                            <tr>
+                              <td align="center" style="font-size:0px;padding:10px 25px;word-break:break-word;">
+                                <div style="font-family:inter,Arial;font-size:12px;line-height:1.5;text-align:center;color:#32363f;">
+                                  <a href="https://cozy.io/fr/legal/" style="color:#5d6165;">Mentions légales</a>
+                                </div>
+                              </td>
+                            </tr>
+                          </table>
+                        </div>
+                        <!--[if mso | IE]>
+            </td>
+        </tr>
+                  </table>
+                <![endif]-->
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+              </td>
+            </tr>
+                  </table>
+                <![endif]-->
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <!--[if mso | IE]>
+          </td>
+        </tr>
+      </table>
+      <![endif]-->
+  </div>
+</body>
+</html>
+`

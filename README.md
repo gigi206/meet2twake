@@ -17,6 +17,10 @@ The script can be configured via environment variables:
 * `MINIO_USER`: the username for minIO (like `minio`)
 * `MINIO_PASSWORD`: the password for minIO
 * `MINIO_INSECURE`: `true` to skip the TLS certificate check
+* `MAIL_FROM`: the email from which the mail will be sent (`noreply@linagora.com` by default)
+* `MAIL_SMTP`: the SMTP host to send the mail (`smtp.linagora.com` by default)
+* `MAIL_PORT`: the port of the SMTP server (25 by default)
+* `MAIL_DISABLE_TLS`; `true` to disable TLS for the SMTP server
 
 ### PostgreSQL Configuration
 
