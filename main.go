@@ -434,15 +434,15 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 const meetingsDirName = "Meetings"
 
 func ensureMeetingDirectory(instance, token string, startedAt *time.Time) (string, error) {
-	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir")
+	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
 	if err != nil {
 		return "", err
 	}
 	dirname := startedAt.Format("2006-01-02 15:04")
-	return ensureDirectory(instance, token, "/"+meetingsDirName+"/"+dirname, meetingsDirID)
+	return ensureDirectory(instance, token, "/"+meetingsDirName+"/"+dirname, meetingsDirID, false)
 }
 
-func ensureDirectory(instance, token, path, parentID string) (string, error) {
+func ensureDirectory(instance, token, path, parentID string, favorite bool) (string, error) {
 	dirID, err := getDirID(instance, token, path)
 	if err != nil {
 		return "", err
@@ -450,7 +450,16 @@ func ensureDirectory(instance, token, path, parentID string) (string, error) {
 	if dirID != "" {
 		return dirID, nil
 	}
-	return createDirectory(instance, token, filepath.Base(path), parentID)
+	dirID, err = createDirectory(instance, token, filepath.Base(path), parentID)
+	if err != nil {
+		return "", err
+	}
+	if favorite {
+		if err := putInFavorite(instance, token, dirID); err != nil {
+			slog.Warn("cannot put in favorite", "error", err)
+		}
+	}
+	return dirID, nil
 }
 
 type stackFile struct {
@@ -523,6 +532,43 @@ func createDirectory(instance, token, dirname, parentID string) (string, error) 
 		return "", fmt.Errorf("cannot parse the response from the stack: %w", err)
 	}
 	return file.Data.ID, nil
+}
+
+func putInFavorite(instance, token, dirID string) error {
+	u := &url.URL{
+		Scheme: "https",
+		Host:   instance,
+		Path:   "/files/" + dirID,
+	}
+	buf, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"type": "io.cozy.files",
+			"id":   dirID,
+			"attributes": map[string]any{
+				"cozyMetadata": map[string]any{
+					"favorite": true,
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("cannot marshal request body: %w", err)
+	}
+	body := bytes.NewReader(buf)
+	req, err := http.NewRequest(http.MethodPatch, u.String(), body)
+	if err != nil {
+		return fmt.Errorf("cannot make request to stack: %w", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot call stack: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+	}
+	return nil
 }
 
 type transcriptRequest struct {
@@ -606,7 +652,7 @@ func getDriveToken(instance string) (string, error) {
 }
 
 func saveTranscript(instance, token string, transcript transcriptRequest) (string, error) {
-	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir")
+	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
 	if err != nil {
 		return "", err
 	}
