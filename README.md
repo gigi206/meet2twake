@@ -11,6 +11,7 @@ The script can be configured via environment variables:
 
 * `LOG_LEVEL`: `debug`, `info` (default), `warn`, or `error`
 * `PORT`: the port on which the script listens for webhooks (8090 by default)
+* `TOKEN`: a token to protect the /minio and /transcript endpoints (must be sent as `Authorization: Bearer $TOKEN`)
 * `CLOUDERY_URL`: the URL of the cloudery (`https://manager.cozycloud.cc/` by default)
 * `CLOUDERY_TOKEN`: the TOKEN for making requests to the cloudery
 * `MINIO_URL`: the URL of minIO API (like `https://minio.example.com`)

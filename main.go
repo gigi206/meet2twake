@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -97,10 +98,11 @@ func main() {
 
 	prepareMinIOClient(debug)
 
+	token := os.Getenv("TOKEN")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/minio", minioHandler)
-	mux.HandleFunc("/transcript", transcriptHandler)
+	mux.HandleFunc("/minio", withAuth(minioHandler, token))
+	mux.HandleFunc("/transcript", withAuth(transcriptHandler, token))
 
 	handler := withLog(mux)
 
@@ -155,6 +157,25 @@ func prepareMinIOClient(debug bool) {
 	if debug {
 		client.TraceOn(os.Stderr)
 	}
+}
+
+func withAuth(next http.HandlerFunc, token string) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if token != "" {
+			auth := r.Header.Get("Authorization")
+			if auth == "" {
+				sendError(http.StatusUnauthorized, w, errors.New("missing Authorization header"))
+				return
+			}
+			auth = strings.TrimPrefix(auth, "Bearer ")
+			if auth != token {
+				sendError(http.StatusForbidden, w, errors.New("invalid Authorization header"))
+				return
+			}
+		}
+
+		next(w, r)
+	})
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code
