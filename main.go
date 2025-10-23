@@ -392,7 +392,8 @@ func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 }
 
 func saveContent(instance, token, filename string, startedAt *time.Time, content *minio.Object) error {
-	dirID, err := ensureMeetingDirectory(instance, token, startedAt)
+	dirname := startedAt.Format("Réunion du 2006-01-02 à 15:04")
+	dirID, err := ensureMeetingDirectory(instance, token, dirname)
 	if err != nil {
 		return fmt.Errorf("cannot create directory in drive: %w", err)
 	}
@@ -435,12 +436,11 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 
 const meetingsDirName = "Meetings"
 
-func ensureMeetingDirectory(instance, token string, startedAt *time.Time) (string, error) {
+func ensureMeetingDirectory(instance, token, dirname string) (string, error) {
 	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
 	if err != nil {
 		return "", err
 	}
-	dirname := startedAt.Format("2006-01-02 15:04")
 	return ensureDirectory(instance, token, "/"+meetingsDirName+"/"+dirname, meetingsDirID, false)
 }
 
@@ -654,19 +654,21 @@ func getDriveToken(instance string) (string, error) {
 }
 
 func saveTranscript(instance, token string, transcript transcriptRequest) (string, error) {
-	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
+	parts := strings.Split(transcript.Title, " du ")
+	name := parts[len(parts)-1]
+	dirID, err := ensureMeetingDirectory(instance, token, "Réunion du "+name)
 	if err != nil {
 		return "", err
 	}
 
 	q := &url.Values{}
 	q.Add("Type", "file")
-	q.Add("Name", transcript.Title+".cozy-note")
+	q.Add("Name", "Transcription du "+name+".cozy-note")
 	q.Add("Content-Type", "text/vnd.cozy.note+markdown")
 	u := &url.URL{
 		Scheme:   "https",
 		Host:     instance,
-		Path:     "/files/" + meetingsDirID,
+		Path:     "/files/" + dirID,
 		RawQuery: q.Encode(),
 	}
 	body := strings.NewReader(transcript.Content)
@@ -687,7 +689,7 @@ func saveTranscript(instance, token string, transcript transcriptRequest) (strin
 	if res.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
 	}
-	return meetingsDirID, nil
+	return dirID, nil
 }
 
 func sendEmail(recipient, instance, dirID string) error {
