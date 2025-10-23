@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/otiai10/openaigo"
 	"github.com/wneessen/go-mail"
 )
 
@@ -34,6 +35,7 @@ var minioClient *minio.Client
 var mailFrom, mailSMTP string
 var mailPort int
 var mailTLSPolicy mail.TLSPolicy
+var aiClient *openaigo.Client
 
 func main() {
 	debug := false
@@ -97,6 +99,13 @@ func main() {
 			mailTLSPolicy = mail.NoTLS
 		}
 	}
+
+	aiClient = openaigo.NewClient(os.Getenv("AI_API_KEY"))
+	baseURL := "https://chat.lucie.ovh.linagora.com/"
+	if u := os.Getenv("AI_BASE_URL"); u != "" {
+		baseURL = u
+	}
+	aiClient.BaseURL = baseURL
 
 	prepareMinIOClient(debug)
 
@@ -606,9 +615,16 @@ func transcriptHandler(res http.ResponseWriter, req *http.Request) {
 	}
 	slog.Info("transcript saved", "sub", transcript.Sub)
 
+	summary, err := generateSummary(transcript.Content)
+	if err == nil {
+		err = saveSummary(instance, token, summary, dirID)
+	}
+	if err != nil {
+		slog.Warn("Cannot generate summary", "err", err)
+	}
+
 	if err := sendEmail(transcript.Email, instance, dirID); err != nil {
-		sendError(http.StatusInternalServerError, res, err)
-		return
+		slog.Warn("Cannot send email", "err", err)
 	}
 	slog.Info("email sent")
 
@@ -653,6 +669,36 @@ func getDriveToken(instance string) (string, error) {
 	return body.Token, nil
 }
 
+const promptTLDR = `
+Tu es un agent dont le rôle est de créer un TL;DR (résumé très concis) d'un compte rendu de réunion. Tu utiliseras un style synthétique, administratif, à la troisième personne, sans affect. Tu recevras en entrée le transcript. Ta tâche est de rédiger un résumé concis et structuré, en te concentrant uniquement sur les informations essentielles et pertinentes. Tu répondras en un paragraphe structuré (3 à 6 phrases), sans rien ajouter d'autre. Tu répondras dans le format suivant sans rien ajouter d'autre:
+### Résumé TL;DR
+[Résumé concis et structuré]
+`
+
+func generateSummary(content string) (string, error) {
+	model := "gpt-oss-120b"
+	if m := os.Getenv("AI_MODEL"); m != "" {
+		model = m
+	}
+	request := openaigo.ChatRequest{
+		Model: model,
+		Messages: []openaigo.Message{
+			{Role: "system", Content: promptTLDR},
+			{Role: "user", Content: content},
+		},
+	}
+	ctx := context.Background()
+	response, err := aiClient.Chat(ctx, request)
+	if err != nil {
+		return "", fmt.Errorf("AI error: %w", err)
+	}
+	if len(response.Choices) == 0 {
+		return "", fmt.Errorf("AI error: no response")
+	}
+	fmt.Printf("response = %#v\n", response)
+	return response.Choices[0].Message.Content, nil
+}
+
 func saveTranscript(instance, token string, transcript transcriptRequest) (string, error) {
 	parts := strings.Split(transcript.Title, " du ")
 	name := parts[len(parts)-1]
@@ -690,6 +736,37 @@ func saveTranscript(instance, token string, transcript transcriptRequest) (strin
 		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
 	}
 	return dirID, nil
+}
+
+func saveSummary(instance, token, summary, dirID string) error {
+	q := &url.Values{}
+	q.Add("Type", "file")
+	q.Add("Name", "Résumé.cozy-note")
+	q.Add("Content-Type", "text/vnd.cozy.note+markdown")
+	u := &url.URL{
+		Scheme:   "https",
+		Host:     instance,
+		Path:     "/files/" + dirID,
+		RawQuery: q.Encode(),
+	}
+	body := strings.NewReader(summary)
+	req, err := http.NewRequest(http.MethodPost, u.String(), body)
+	if err != nil {
+		return fmt.Errorf("cannot make request to stack: %w", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("cannot call stack: %w", err)
+	}
+	slog.Debug("Save summary",
+		"instance", instance,
+		"status", res.StatusCode)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+	}
+	return nil
 }
 
 func sendEmail(recipient, instance, dirID string) error {

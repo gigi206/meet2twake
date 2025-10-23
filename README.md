@@ -22,6 +22,9 @@ The script can be configured via environment variables:
 * `MAIL_SMTP`: the SMTP host to send the mail (`smtp.linagora.com` by default)
 * `MAIL_PORT`: the port of the SMTP server (25 by default)
 * `MAIL_DISABLE_TLS`; `true` to disable TLS for the SMTP server
+* `AI_BASE_URL`: the OpenAI compatible endpoint base URL (`https://chat.lucie.ovh.linagora.com/` by default)
+* `AI_API_KEY`: the API key to use for AI
+* `AI_MODEL`: the model to use for generating the summary (`gpt-oss-120b` by default)
 
 ### PostgreSQL Configuration
 
