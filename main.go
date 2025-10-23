@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	_ "time/tzdata"
+
 	"github.com/gofrs/uuid/v5"
 	pgxfrs "github.com/jackc/pgx-gofrs-uuid"
 	"github.com/jackc/pgx/v5"
