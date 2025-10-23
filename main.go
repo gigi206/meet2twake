@@ -274,6 +274,12 @@ func getRoomIDAndStartedAt(key string) (*uuid.UUID, *time.Time, error) {
 		return nil, nil, fmt.Errorf("invalid room_name UUID: %w", err)
 	}
 	startedAt := time.UnixMicro(data.StartedAt / 1000)
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err == nil {
+		startedAt = startedAt.In(loc)
+	} else {
+		slog.Warn("Cannot load Paris timezone", "error", err)
+	}
 	return &id, &startedAt, nil
 }
 
