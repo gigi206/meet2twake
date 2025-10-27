@@ -401,13 +401,22 @@ func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 }
 
 func saveContent(instance, token, filename string, startedAt *time.Time, content *minio.Object) error {
-	dirname := startedAt.Format("Réunion du 2006-01-02 à 15:04")
+	dirname := "Reunion_" + startedAt.Format("02-01-2006_15-04")
 	dirID, err := ensureMeetingDirectory(instance, token, dirname)
 	if err != nil {
 		return fmt.Errorf("cannot create directory in drive: %w", err)
 	}
+
+	// Pour les fichiers .ogg, les placer dans le dossier Inbox
 	if strings.Contains(filename, ".ogg") {
-		filename = "audio-" + filename
+		inboxID, err := ensureInboxDirectory(instance, token)
+		if err != nil {
+			return fmt.Errorf("cannot create inbox directory: %w", err)
+		}
+		// Extraire le GUID du filename et construire GUID_DATE_HEURE.ogg
+		guid := strings.TrimSuffix(filename, ".ogg")
+		filename = guid + "_" + startedAt.Format("02-01-2006_15-04") + ".ogg"
+		dirID = inboxID
 	} else if strings.Contains(filename, ".mp4") {
 		filename = "recording-" + filename
 	}
@@ -443,7 +452,7 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 	return nil
 }
 
-const meetingsDirName = "Meetings"
+const meetingsDirName = "_Reunions"
 
 func ensureMeetingDirectory(instance, token, dirname string) (string, error) {
 	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
@@ -451,6 +460,14 @@ func ensureMeetingDirectory(instance, token, dirname string) (string, error) {
 		return "", err
 	}
 	return ensureDirectory(instance, token, "/"+meetingsDirName+"/"+dirname, meetingsDirID, false)
+}
+
+func ensureInboxDirectory(instance, token string) (string, error) {
+	meetingsDirID, err := ensureDirectory(instance, token, "/"+meetingsDirName, "io.cozy.files.root-dir", true)
+	if err != nil {
+		return "", err
+	}
+	return ensureDirectory(instance, token, "/"+meetingsDirName+"/Inbox", meetingsDirID, false)
 }
 
 func ensureDirectory(instance, token, path, parentID string, favorite bool) (string, error) {
@@ -702,14 +719,23 @@ func generateSummary(content string) (string, error) {
 func saveTranscript(instance, token string, transcript transcriptRequest) (string, error) {
 	parts := strings.Split(transcript.Title, " du ")
 	name := parts[len(parts)-1]
-	dirID, err := ensureMeetingDirectory(instance, token, "Réunion du "+name)
+
+	// Parser la date au format "2006-01-02 à 15:04" et reformater en "Reunion_02-01-2006_15-04"
+	loc, _ := time.LoadLocation("Europe/Paris")
+	parsedTime, err := time.ParseInLocation("2006-01-02 à 15:04", name, loc)
+	if err != nil {
+		return "", fmt.Errorf("cannot parse date from title: %w", err)
+	}
+	dirname := "Reunion_" + parsedTime.Format("02-01-2006_15-04")
+
+	dirID, err := ensureMeetingDirectory(instance, token, dirname)
 	if err != nil {
 		return "", err
 	}
 
 	q := &url.Values{}
 	q.Add("Type", "file")
-	q.Add("Name", "Transcription du "+name+".cozy-note")
+	q.Add("Name", "Transcription_"+parsedTime.Format("02-01-2006_15-04")+".cozy-note")
 	q.Add("Content-Type", "text/vnd.cozy.note+markdown")
 	u := &url.URL{
 		Scheme:   "https",
