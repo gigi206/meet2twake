@@ -17,6 +17,7 @@ The script can be configured via environment variables:
 * `MINIO_URL`: the URL of minIO API (like `https://minio.example.com`)
 * `MINIO_USER`: the username for minIO (like `minio`)
 * `MINIO_PASSWORD`: the password for minIO
+* `MINIO_USE_SSL`: `true` to use HTTPS, `false` to use HTTP (default: `true`)
 * `MINIO_INSECURE`: `true` to skip the TLS certificate check
 * `MAIL_FROM`: the email from which the mail will be sent (`noreply@linagora.com` by default)
 * `MAIL_SMTP`: the SMTP host to send the mail (`smtp.linagora.com` by default)

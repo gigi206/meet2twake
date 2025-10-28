@@ -129,6 +129,7 @@ func prepareMinIOClient(debug bool) {
 	minioUser := os.Getenv("MINIO_USER")
 	minioPassword := os.Getenv("MINIO_PASSWORD")
 	minioInsecure := os.Getenv("MINIO_INSECURE")
+	minioUseSSL := os.Getenv("MINIO_USE_SSL")
 
 	if minioURL == "" || minioUser == "" || minioPassword == "" {
 		slog.Error("MINIO_URL, MINIO_USER and MINIO_PASSWORD must be defined")
@@ -141,6 +142,15 @@ func prepareMinIOClient(debug bool) {
 	}
 
 	useSSL := true
+	if minioUseSSL != "" {
+		ssl, err := strconv.ParseBool(minioUseSSL)
+		if err != nil {
+			slog.Error("Invalid MINIO_USE_SSL", "error", err)
+			os.Exit(1)
+		}
+		useSSL = ssl
+	}
+
 	skipVerify := false
 	if minioInsecure != "" {
 		insecure, err := strconv.ParseBool(minioInsecure)
