@@ -256,10 +256,14 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	sub, err := getSubFromRoomID(*roomID)
+	sub, email, err := getSubFromRoomID(*roomID)
 	if err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
+	}
+
+	if email == "" {
+		slog.Warn("No email found for user", "sub", sub, "roomID", roomID.String())
 	}
 
 	instance, err := findInstanceBySub(sub)
@@ -282,12 +286,24 @@ func minioHandler(res http.ResponseWriter, req *http.Request) {
 	}
 	defer content.Close()
 
-	if err := saveContent(instance, token, filepath.Base(key), startedAt, content); err != nil {
+	dirID, err := saveContent(instance, token, filepath.Base(key), startedAt, content)
+	if err != nil {
 		sendError(http.StatusInternalServerError, res, err)
 		return
 	}
 
 	slog.Info("recording saved", "sub", sub)
+
+	// Only send email for .mp4 recordings, not .ogg files
+	// .ogg files are part of the transcription workflow and will receive email from transcriptHandler
+	if email != "" && strings.Contains(key, ".mp4") {
+		if err := sendEmail(email, instance, dirID); err != nil {
+			slog.Warn("Cannot send email", "err", err, "recipient", email, "instance", instance)
+		} else {
+			slog.Info("email sent", "recipient", email, "instance", instance)
+		}
+	}
+
 	res.WriteHeader(http.StatusNoContent)
 }
 
@@ -341,7 +357,7 @@ func getFromMinIO(key string) (*minio.Object, error) {
 }
 
 const query = `
-SELECT u.sub
+SELECT u.sub, u.email
 FROM meet_user u
 JOIN meet_resource_access ra ON u.id = ra.user_id
 WHERE ra.resource_id = $1
@@ -349,12 +365,12 @@ ORDER BY ra.created_at;
 `
 
 func getPostgresURL() string {
-	// Si POSTGRES_URL est défini, l'utiliser directement (rétrocompatibilité)
+	// If POSTGRES_URL is defined, use it directly (backward compatibility)
 	if pgURL := os.Getenv("POSTGRES_URL"); pgURL != "" {
 		return pgURL
 	}
 
-	// Sinon, construire l'URL à partir des composants
+	// Otherwise, build the URL from components
 	host := os.Getenv("POSTGRES_HOST")
 	port := os.Getenv("POSTGRES_PORT")
 	user := os.Getenv("POSTGRES_USER")
@@ -373,7 +389,7 @@ func getPostgresURL() string {
 		sslmode = "require"
 	}
 
-	// Encoder le user et password pour l'URL
+	// Encode user and password for the URL
 	userEncoded := url.QueryEscape(user)
 	passwordEncoded := url.QueryEscape(password)
 
@@ -381,11 +397,11 @@ func getPostgresURL() string {
 		userEncoded, passwordEncoded, host, port, database, sslmode)
 }
 
-func getSubFromRoomID(roomID uuid.UUID) (string, error) {
+func getSubFromRoomID(roomID uuid.UUID) (string, string, error) {
 	ctx := context.Background()
 	config, err := pgxpool.ParseConfig(getPostgresURL())
 	if err != nil {
-		return "", fmt.Errorf("Cannot parse PG config: %s", err)
+		return "", "", fmt.Errorf("Cannot parse PG config: %s", err)
 	}
 
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
@@ -395,35 +411,46 @@ func getSubFromRoomID(roomID uuid.UUID) (string, error) {
 
 	conn, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
-		return "", fmt.Errorf("Cannot connect to PG: %s", err)
+		return "", "", fmt.Errorf("Cannot connect to PG: %s", err)
 	}
 	defer conn.Close()
 
 	var sub string
-	err = conn.QueryRow(context.Background(), query, roomID).Scan(&sub)
+	var email *string
+	err = conn.QueryRow(context.Background(), query, roomID).Scan(&sub, &email)
 	if err != nil {
-		return "", fmt.Errorf("Cannot query: %s", err)
+		return "", "", fmt.Errorf("Cannot query: %s", err)
 	}
+
+	emailValue := ""
+	if email != nil {
+		emailValue = *email
+	}
+
 	slog.Debug("getSubFromRoomID",
 		"roomID", roomID.String(),
-		"sub", sub)
-	return sub, nil
+		"sub", sub,
+		"email", emailValue)
+	return sub, emailValue, nil
 }
 
-func saveContent(instance, token, filename string, startedAt *time.Time, content *minio.Object) error {
+func saveContent(instance, token, filename string, startedAt *time.Time, content *minio.Object) (string, error) {
 	dirname := "Reunion_" + startedAt.Format("02-01-2006_15-04")
-	dirID, err := ensureMeetingDirectory(instance, token, dirname)
+	meetingDirID, err := ensureMeetingDirectory(instance, token, dirname)
 	if err != nil {
-		return fmt.Errorf("cannot create directory in drive: %w", err)
+		return "", fmt.Errorf("cannot create directory in drive: %w", err)
 	}
 
-	// Pour les fichiers .ogg, les placer dans le dossier Inbox
+	// dirID is used for saving the file
+	dirID := meetingDirID
+
+	// For .ogg files, save them in Inbox folder
 	if strings.Contains(filename, ".ogg") {
 		inboxID, err := ensureInboxDirectory(instance, token)
 		if err != nil {
-			return fmt.Errorf("cannot create inbox directory: %w", err)
+			return "", fmt.Errorf("cannot create inbox directory: %w", err)
 		}
-		// Extraire le GUID du filename et construire GUID_DATE_HEURE.ogg
+		// Extract GUID from filename and build GUID_DATE_TIME.ogg
 		guid := strings.TrimSuffix(filename, ".ogg")
 		filename = guid + "_" + startedAt.Format("02-01-2006_15-04") + ".ogg"
 		dirID = inboxID
@@ -444,12 +471,12 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 	}
 	req, err := http.NewRequest(http.MethodPost, u.String(), content)
 	if err != nil {
-		return fmt.Errorf("cannot make request to stack: %w", err)
+		return "", fmt.Errorf("cannot make request to stack: %w", err)
 	}
 	req.Header.Add("Authorization", "Bearer "+token)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("cannot call stack: %w", err)
+		return "", fmt.Errorf("cannot call stack: %w", err)
 	}
 	slog.Debug("Save recording",
 		"instance", instance,
@@ -457,9 +484,10 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 		"status", res.StatusCode)
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusCreated {
-		return fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
+		return "", fmt.Errorf("unexpected response from the stack: %d", res.StatusCode)
 	}
-	return nil
+	// Always return meeting directory ID for email link, even if file was saved in Inbox
+	return meetingDirID, nil
 }
 
 const meetingsDirName = "_Reunions"
@@ -651,9 +679,9 @@ func transcriptHandler(res http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := sendEmail(transcript.Email, instance, dirID); err != nil {
-		slog.Warn("Cannot send email", "err", err)
+		slog.Warn("Cannot send email", "err", err, "recipient", transcript.Email, "instance", instance)
 	} else {
-		slog.Info("email sent")
+		slog.Info("email sent", "recipient", transcript.Email, "instance", instance)
 	}
 
 	res.WriteHeader(http.StatusNoContent)
@@ -731,7 +759,7 @@ func saveTranscript(instance, token string, transcript transcriptRequest) (strin
 	parts := strings.Split(transcript.Title, " du ")
 	name := parts[len(parts)-1]
 
-	// Parser la date au format "2006-01-02 à 15:04" et reformater en "Reunion_02-01-2006_15-04"
+	// Parse the date in format "2006-01-02 à 15:04" and reformat to "Reunion_02-01-2006_15-04"
 	loc, _ := time.LoadLocation("Europe/Paris")
 	parsedTime, err := time.ParseInLocation("2006-01-02 à 15:04", name, loc)
 	if err != nil {
@@ -814,7 +842,9 @@ func sendEmail(recipient, instance, dirID string) error {
 	link := fmt.Sprintf("https://%s/#/folder/%s", strings.Join(parts, "."), dirID)
 	tmpl := template.Must(template.New("email").Parse(emailTemplate))
 	buf := new(bytes.Buffer)
-	tmpl.Execute(buf, map[string]any{"Title": title, "Text": text, "Link": link})
+	if err := tmpl.Execute(buf, map[string]any{"Title": title, "Text": text, "Link": link}); err != nil {
+		return fmt.Errorf("cannot execute email template: %w", err)
+	}
 	html := buf.String()
 	text += "\n\n" + link
 
