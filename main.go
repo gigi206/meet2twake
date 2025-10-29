@@ -652,8 +652,9 @@ func transcriptHandler(res http.ResponseWriter, req *http.Request) {
 
 	if err := sendEmail(transcript.Email, instance, dirID); err != nil {
 		slog.Warn("Cannot send email", "err", err)
+	} else {
+		slog.Info("email sent")
 	}
-	slog.Info("email sent")
 
 	res.WriteHeader(http.StatusNoContent)
 }
