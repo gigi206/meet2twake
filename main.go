@@ -450,9 +450,7 @@ func saveContent(instance, token, filename string, startedAt *time.Time, content
 		if err != nil {
 			return "", fmt.Errorf("cannot create inbox directory: %w", err)
 		}
-		// Extract GUID from filename and build GUID_DATE_TIME.ogg
-		guid := strings.TrimSuffix(filename, ".ogg")
-		filename = guid + "_" + startedAt.Format("02-01-2006_15-04") + ".ogg"
+		filename = "Réunion_" + startedAt.Format("02-01-2006_15-04") + ".ogg"
 		dirID = inboxID
 	} else if strings.Contains(filename, ".mp4") {
 		filename = "recording-" + filename
